@@ -31,13 +31,15 @@ import {
 import { formatCostGate, printCostGateJson, runCostGate } from "./cost.js";
 import { diffFrames, formatDiffReport, readTrace } from "./diff.js";
 import { printResults, printResultsJson, runDoctor } from "./doctor.js";
+import { loadServersConfig, writeDockerCompose } from "./generate.js";
+import { type HubOptions, parseHubUpstream, startHub } from "./hub.js";
 import { formatProfile, printProfileJson, profileTrace } from "./profile.js";
 import { startProxy } from "./proxy.js";
 import { parseSize, startRecorder } from "./recorder.js";
 import { startReplay } from "./replay.js";
 import { formatSummary, printSummaryJson, summarizeTrace } from "./summary.js";
 import { createPrinter, tailTrace } from "./tail.js";
-import { setQuiet } from "./util/log.js";
+import { log, setQuiet } from "./util/log.js";
 import { validatePort } from "./util/validate-port.js";
 import { openTrace } from "./viewer.js";
 
@@ -470,6 +472,59 @@ cli
       process.stdout.write(`${formatCallResultHuman(result)}\n`);
     }
     process.exit(exitCodeFor(result));
+  });
+
+cli
+  .command("generate", "Generate a docker-compose.yml from a servers.yaml config")
+  .option("--config <path>", "Path to servers.yaml", { default: "servers.yaml" })
+  .option("--out <path>", "Output path for docker-compose.yml", { default: "docker-compose.yml" })
+  .option("--quiet", "Suppress informational logs")
+  .action((opts) => {
+    setQuiet(!!opts.quiet);
+    try {
+      const config = loadServersConfig(opts.config);
+      writeDockerCompose(config, opts.out);
+      log.info(`generated ${opts.out} (${config.servers.length} server${config.servers.length === 1 ? "" : "s"})`);
+    } catch (err) {
+      process.stderr.write(`${kleur.red("error:")} ${(err as Error).message}\n`);
+      process.exit(1);
+    }
+  });
+
+cli
+  .command("hub", "Aggregate multiple MCP proxy streams into one inspector UI")
+  .option("--upstream <spec>", "label:host:port of a running proxy. Repeatable.", {
+    type: [String],
+  })
+  .option("--port <port>", "Port for the aggregated UI", { default: 7456 })
+  .option("--no-open", "Don't auto-open the browser")
+  .option("--quiet", "Suppress informational logs")
+  .action(async (opts) => {
+    setQuiet(!!opts.quiet);
+    const rawUpstreams = (Array.isArray(opts.upstream) ? opts.upstream : [opts.upstream]).filter(
+      (v): v is string => typeof v === "string" && v.length > 0 && v !== "undefined",
+    );
+    if (rawUpstreams.length === 0) {
+      process.stderr.write(`${kleur.red("error:")} at least one --upstream is required\n`);
+      process.exit(1);
+    }
+    let upstreams: HubOptions["upstreams"];
+    try {
+      upstreams = rawUpstreams.map(parseHubUpstream);
+    } catch (err) {
+      process.stderr.write(`${kleur.red("error:")} ${(err as Error).message}\n`);
+      process.exit(1);
+    }
+    const port = validatePort(opts.port);
+    if (!port.ok) {
+      process.stderr.write(`${port.message}\n`);
+      process.exit(1);
+    }
+    await startHub({
+      upstreams,
+      port: port.value,
+      openBrowser: opts.open !== false,
+    });
   });
 
 cli.help();

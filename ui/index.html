@@ -41,6 +41,13 @@
       }
       .filter-bar input:focus { outline: none; border-color: var(--accent); }
       .filter-bar .count { color: var(--muted); font-size: 11px; white-space: nowrap; }
+      .filter-bar select {
+        background: #060606; color: var(--fg);
+        border: 1px solid var(--border); border-radius: 4px;
+        padding: 5px 8px; font-family: inherit; font-size: 12px;
+        cursor: pointer;
+      }
+      .filter-bar select:focus { outline: none; border-color: var(--accent); }
       .rows { flex: 1; overflow-y: auto; }
       .row {
         padding: 10px 14px; border-bottom: 1px solid var(--border);
@@ -70,12 +77,33 @@
         font-variant-numeric: tabular-nums;
       }
       .row .cost.unknown { color: var(--muted); opacity: 0.6; }
+      .row .server-badge {
+        display: inline-block; margin-left: 6px;
+        padding: 1px 6px; border-radius: 3px;
+        font-size: 10px; font-weight: 500; letter-spacing: 0.03em;
+        opacity: 0.85; vertical-align: middle;
+      }
       .row.hidden { display: none; }
       header .total {
         color: var(--accent); font-size: 11px;
         font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
       }
       header .total.zero { color: var(--muted); opacity: 0.5; }
+      .tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); background: var(--panel); }
+      .tab {
+        padding: 10px 20px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase;
+        cursor: pointer; border-bottom: 2px solid transparent; color: var(--muted);
+      }
+      .tab:hover { color: var(--fg); }
+      .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+      .panel { display: none; }
+      .panel.active { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+      .topo-wrap { flex: 1; overflow: hidden; position: relative; }
+      .topo-tooltip {
+        position: absolute; background: #1a1a1a; border: 1px solid var(--border);
+        border-radius: 4px; padding: 8px 12px; font-size: 11px; pointer-events: none;
+        display: none; max-width: 240px; z-index: 10;
+      }
       .detail { padding: 0; overflow: auto; display: flex; flex-direction: column; min-height: 0; }
       .detail-bar {
         display: flex; align-items: center; gap: 8px;
@@ -102,16 +130,31 @@
       <span class="total zero" id="stat-cost" title="Sum of cost estimates across all tools/call responses in this session">$0.0000</span>
       <span class="stat" id="stat-frames">0 frames</span>
     </header>
-    <main>
-      <div class="timeline">
-        <div class="filter-bar">
-          <input id="filter" type="search" placeholder="Filter by method or body — Esc to clear" autocomplete="off" spellcheck="false" />
-          <span class="count" id="filter-count"></span>
-        </div>
-        <div class="rows" id="rows"></div>
+    <main style="display:flex;flex-direction:column;min-height:0">
+      <div class="tabs">
+        <div class="tab active" data-tab="timeline">Timeline</div>
+        <div class="tab" data-tab="topology">Topology</div>
       </div>
-      <div class="detail" id="detail">
-        <div class="empty">Select a frame to inspect.</div>
+      <!-- Timeline panel -->
+      <div id="panel-timeline" class="panel active" style="display:flex;flex:1;min-height:0">
+        <div class="timeline">
+          <div class="filter-bar">
+            <input id="filter" type="search" placeholder="Filter by method or body — Esc to clear" autocomplete="off" spellcheck="false" />
+            <select id="server-filter"><option value="">All servers</option></select>
+            <span class="count" id="filter-count"></span>
+          </div>
+          <div class="rows" id="rows"></div>
+        </div>
+        <div class="detail" id="detail">
+          <div class="empty">Select a frame to inspect.</div>
+        </div>
+      </div>
+      <!-- Topology panel -->
+      <div id="panel-topology" class="panel" style="flex:1;min-height:0">
+        <div class="topo-wrap" id="topo-wrap">
+          <div class="empty" id="topo-empty">Waiting for multi-server frames…</div>
+        </div>
+        <div class="topo-tooltip" id="topo-tooltip"></div>
       </div>
     </main>
     <script>
@@ -123,10 +166,149 @@
       const statCost = document.getElementById("stat-cost");
       const filter   = document.getElementById("filter");
       const fcount   = document.getElementById("filter-count");
+      const topoWrap    = document.getElementById("topo-wrap");
+      const topoTooltip = document.getElementById("topo-tooltip");
+      let activeTab = "timeline";
+
+      // Tab switching
+      for (const tab of document.querySelectorAll(".tab")) {
+        tab.addEventListener("click", () => {
+          activeTab = tab.dataset.tab;
+          for (const t of document.querySelectorAll(".tab"))   t.classList.toggle("active", t.dataset.tab === activeTab);
+          for (const p of document.querySelectorAll(".panel")) p.classList.toggle("active", p.id === `panel-${activeTab}`);
+          if (activeTab === "topology") renderTopology();
+        });
+      }
+
+      function switchToTimeline(server) {
+        activeTab = "timeline";
+        for (const t of document.querySelectorAll(".tab"))   t.classList.toggle("active", t.dataset.tab === "timeline");
+        for (const p of document.querySelectorAll(".panel")) p.classList.toggle("active", p.id === "panel-timeline");
+        if (server !== undefined) {
+          serverFilterEl.value = server;
+          serverFilterStr = server;
+          render();
+        }
+      }
+
+      function renderTopology() {
+        const callsByServer = {};
+        for (const f of frames) {
+          if (!f.server) continue;
+          if (!callsByServer[f.server]) callsByServer[f.server] = [];
+          const c = classify(f);
+          if (c.kind === "request") callsByServer[f.server].push(f);
+        }
+        const serverNames = Object.keys(callsByServer);
+
+        if (serverNames.length === 0) {
+          topoWrap.innerHTML = '<div class="empty">Waiting for multi-server frames…</div>';
+          return;
+        }
+
+        const W = topoWrap.clientWidth  || 800;
+        const H = topoWrap.clientHeight || 500;
+        const cx = W / 2;
+        const cy = H / 2;
+        const radius = Math.min(W, H) * 0.35;
+        const count = serverNames.length;
+
+        const svgParts = [`<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">`];
+
+        serverNames.forEach((name, i) => {
+          const angle = (2 * Math.PI * i / count) - Math.PI / 2;
+          const nx = cx + radius * Math.cos(angle);
+          const ny = cy + radius * Math.sin(angle);
+          const weight = Math.min(6, 1 + (callsByServer[name].length / 5));
+          const color = serverColor(name);
+          svgParts.push(`<line x1="${cx}" y1="${cy}" x2="${nx}" y2="${ny}" stroke="${color}" stroke-width="${weight.toFixed(1)}" opacity="0.35"/>`);
+        });
+
+        svgParts.push(`<circle cx="${cx}" cy="${cy}" r="22" fill="#1a1a1a" stroke="#555" stroke-width="1.5"/>`);
+        svgParts.push(`<text x="${cx}" y="${cy + 4}" text-anchor="middle" fill="#8a8a8a" font-size="10" font-family="monospace">agent</text>`);
+
+        serverNames.forEach((name, i) => {
+          const angle = (2 * Math.PI * i / count) - Math.PI / 2;
+          const nx = cx + radius * Math.cos(angle);
+          const ny = cy + radius * Math.sin(angle);
+          const calls = callsByServer[name].length;
+          const r = Math.min(44, 20 + calls * 1.5);
+          const color = serverColor(name);
+          svgParts.push(`<circle cx="${nx}" cy="${ny}" r="${r}" fill="#111" stroke="${color}" stroke-width="1.5" data-server="${escapeHtml(name)}" style="cursor:pointer"/>`);
+          svgParts.push(`<text x="${nx}" y="${ny + 4}" text-anchor="middle" fill="${color}" font-size="11" font-family="monospace" pointer-events="none">${escapeHtml(name)}</text>`);
+          svgParts.push(`<text x="${nx}" y="${ny + 17}" text-anchor="middle" fill="${color}" opacity="0.65" font-size="10" font-family="monospace" pointer-events="none">${calls} call${calls === 1 ? "" : "s"}</text>`);
+        });
+
+        svgParts.push("</svg>");
+        topoWrap.innerHTML = svgParts.join("");
+
+        for (const circle of topoWrap.querySelectorAll("circle[data-server]")) {
+          const server = circle.getAttribute("data-server");
+          circle.addEventListener("mouseenter", (ev) => {
+            const recent = (callsByServer[server] || []).slice(-3).reverse();
+            if (!recent.length) return;
+            topoTooltip.innerHTML = recent.map((f) => {
+              const c = classify(f);
+              return `<div style="margin-bottom:4px"><span style="color:${serverColor(server)}">${escapeHtml(c.method ?? "?")}</span></div>`;
+            }).join("");
+            topoTooltip.style.display = "block";
+            topoTooltip.style.left = `${ev.offsetX + 12}px`;
+            topoTooltip.style.top  = `${ev.offsetY + 8}px`;
+          });
+          circle.addEventListener("mousemove", (ev) => {
+            topoTooltip.style.left = `${ev.offsetX + 12}px`;
+            topoTooltip.style.top  = `${ev.offsetY + 8}px`;
+          });
+          circle.addEventListener("mouseleave", () => {
+            topoTooltip.style.display = "none";
+          });
+          circle.addEventListener("click", () => {
+            switchToTimeline(server);
+          });
+        }
+      }
+
+      const serverFilterEl = document.getElementById("server-filter");
 
       const frames = [];
       let selected = null;
       let filterStr = "";
+      let serverFilterStr = "";
+      const knownServers = new Set();
+
+      function updateServerFilter() {
+        const current = serverFilterEl.value;
+        let changed = false;
+        for (const f of frames) {
+          if (f.server && !knownServers.has(f.server)) {
+            knownServers.add(f.server);
+            const opt = document.createElement("option");
+            opt.value = f.server;
+            opt.textContent = f.server;
+            serverFilterEl.appendChild(opt);
+            changed = true;
+          }
+        }
+        if (changed) serverFilterEl.value = current;
+      }
+
+      const SERVER_PALETTE = [
+        '#6ee7b7','#fbbf24','#f87171','#818cf8',
+        '#34d399','#fb923c','#60a5fa','#c084fc',
+      ];
+
+      function serverColor(name) {
+        if (!name) return '#8a8a8a';
+        let h = 0;
+        for (let i = 0; i < name.length; i++) h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
+        return SERVER_PALETTE[Math.abs(h) % SERVER_PALETTE.length];
+      }
+
+      function serverBadgeHtml(f) {
+        if (!f.server) return '';
+        const color = serverColor(f.server);
+        return `<span class="server-badge" style="background:${color}22;color:${color};border:1px solid ${color}44">${escapeHtml(f.server)}</span>`;
+      }
 
       function fmtCost(usd) {
         if (usd === null || usd === undefined) return null;
@@ -187,6 +369,7 @@
       }
 
       function matchesFilter(f) {
+        if (serverFilterStr && f.server !== serverFilterStr) return false;
         if (!filterStr) return true;
         const c = classify(f);
         const hay = [
@@ -198,6 +381,7 @@
       }
 
       function render() {
+        updateServerFilter();
         let shown = 0;
         rowsEl.innerHTML = frames.map((f, i) => {
           const visible = matchesFilter(f);
@@ -208,6 +392,7 @@
           return `<div class="${cls.join(" ")}" data-i="${i}">
             <span class="dir">${f.direction === "in" ? "←" : "→"}</span>
             <span class="method">${escapeHtml(rowLabel(f))}</span>
+            ${serverBadgeHtml(f)}
             ${costBadgeHtml(f)}
           </div>`;
         }).join("");
@@ -270,6 +455,10 @@
           render();
         }
       });
+      serverFilterEl.addEventListener("change", () => {
+        serverFilterStr = serverFilterEl.value;
+        render();
+      });
 
       const ws = new WebSocket(`ws://${location.host}/ws`);
       ws.onmessage = (ev) => {
@@ -277,6 +466,7 @@
         if (msg.type === "frame") {
           frames.push(...msg.frames);
           render();
+          if (activeTab === "topology") renderTopology();
         }
       };
 

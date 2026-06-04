@@ -13,12 +13,14 @@ export interface StoredFrame {
   id: number;
   direction: "in" | "out";
   ts: number;
+  server?: string;
   frame: JsonRpcFrame;
 }
 
 export interface RecordInput {
   direction: "in" | "out";
   frame: JsonRpcFrame;
+  server?: string;
 }
 
 const MAX_FRAMES = 10_000;
@@ -26,12 +28,13 @@ const MAX_FRAMES = 10_000;
 export class TraceStore {
   private buf: StoredFrame[] = [];
   private nextId = 1;
+  private dir: string;
   private logPath: string;
   private initialized = false;
 
   constructor(opts?: { logDir?: string }) {
-    const dir = opts?.logDir ?? join(homedir(), ".mcp-devtools");
-    this.logPath = join(dir, `session-${Date.now()}.jsonl`);
+    this.dir = opts?.logDir ?? join(homedir(), ".mcp-devtools");
+    this.logPath = join(this.dir, `session-${Date.now()}.jsonl`);
   }
 
   record(input: RecordInput): number {
@@ -39,6 +42,7 @@ export class TraceStore {
       id: this.nextId++,
       direction: input.direction,
       ts: Date.now(),
+      server: input.server,
       frame: input.frame,
     };
     this.buf.push(entry);
@@ -59,7 +63,9 @@ export class TraceStore {
 
   private async persist(entry: StoredFrame): Promise<void> {
     if (!this.initialized) {
-      await mkdir(join(homedir(), ".mcp-devtools"), { recursive: true });
+      await mkdir(this.dir, { recursive: true }).catch(() => {
+        /* never throw from the recorder — the proxy must keep running */
+      });
       this.initialized = true;
     }
     await appendFile(this.logPath, `${JSON.stringify(entry)}\n`).catch(() => {

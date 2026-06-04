@@ -1,0 +1,5 @@
+servers:
+  - name: filesystem
+    command: node smoke/fake-server.js
+  - name: github
+    command: node smoke/fake-server.js
